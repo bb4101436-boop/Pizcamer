@@ -13,7 +13,7 @@ button,input,select{font:inherit}
 button{cursor:pointer;color:inherit}
 button:disabled{opacity:.4;cursor:not-allowed}
 #app{position:fixed;inset:0;background:#000;overflow:hidden}
-#video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#090909;filter:none}
+#video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#090909;filter:none;will-change:transform;transition:transform .12s linear;touch-action:pan-y}
 #video.mirror{transform:scaleX(-1)}
 #shade{position:absolute;inset:0;pointer-events:none;background:linear-gradient(#0009,transparent 22%,transparent 62%,#000a)}
 #top{position:absolute;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 10px) 12px 8px;display:flex;align-items:center;justify-content:space-between;gap:8px;z-index:5}
@@ -87,7 +87,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div class="topgroup"><button class="round" id="flashBtn" aria-label="Flash" title="Flash">⚡</button><div id="brand">PIZCAMERA</div></div>
     <div class="topgroup"><button class="round" id="flipBtn" aria-label="Switch camera" title="Switch camera">🔄</button><button class="round" id="settingsBtn" aria-label="Settings" title="Settings">⚙️</button></div>
   </header>
-  <div id="zoom"><button class="zoomBtn active" data-zoom="1">1x</button><button class="zoomBtn" data-zoom="2">2x</button><button class="zoomBtn" data-zoom="3">3x</button><span id="zoomLabel">1x</span></div>
+  <div id="zoom"><button class="zoomBtn active" data-zoom="1">1x</button><button class="zoomBtn" data-zoom="2">2x</button><button class="zoomBtn" data-zoom="3">3x</button><button class="zoomBtn" data-zoom="4">4x</button><button class="zoomBtn" data-zoom="5">5x</button><button class="zoomBtn" data-zoom="6">6x</button><span id="zoomLabel">1.0x</span></div>
   <div id="status">Camera not started</div><div id="timer">00:00:00</div>
   <div id="bottom">
     <div id="filters">
@@ -126,7 +126,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div class="viewBody" id="settings">
       <div class="setting"><div><label for="photoQuality">Photo size</label><small>Used when saving a photo</small></div><select id="photoQuality"><option value="high">High resolution</option><option value="medium">Medium</option><option value="small">Smaller file</option></select></div>
       <div class="setting"><div><label for="videoQuality">Video resolution</label><small>Applied when camera supports it</small></div><select id="videoQuality"><option value="high">High (1080p target)</option><option value="medium">Medium (720p target)</option><option value="low">Low (480p target)</option></select></div>
-      <div class="setting"><div><label for="frameRate">Frame rate</label><small>Requested video frame rate</small></div><select id="frameRate"><option value="30">30 FPS</option><option value="24">24 FPS</option><option value="60">60 FPS (if supported)</option></select></div>
+      <div class="setting"><div><label for="frameRate">Frame rate</label><small>Higher FPS can make supported video smoother</small></div><select id="frameRate"><option value="60" selected>60 FPS (if supported)</option><option value="30">30 FPS</option><option value="24">24 FPS</option></select></div>
+      <div class="setting"><div><label for="torchSetting">Flashlight mode</label><small>Continuous torch when supported; not every camera has a controllable light</small></div><select id="torchSetting"><option value="manual">Manual</option><option value="off">Always off</option><option value="on">Keep torch on</option></select></div>
+      <div class="setting"><div><label for="zoomRange">Zoom level</label><small>Swipe up on the camera to zoom in; swipe down to zoom out (1x–6x)</small></div><input id="zoomRange" type="range" min="1" max="6" step="0.1" value="1" aria-label="Zoom level"></div>
       <div class="setting"><div><label for="gridToggle">Composition grid</label><small>Show thirds grid on preview</small></div><input id="gridToggle" type="checkbox"></div>
       <div class="setting"><div><label for="mirrorToggle">Mirror front-camera preview</label><small>Saved photos are not mirrored</small></div><input id="mirrorToggle" type="checkbox" checked></div>
       <div class="setting"><div><label for="soundToggle">Shutter sound</label><small>Browser/device may restrict sound</small></div><input id="soundToggle" type="checkbox"></div>
@@ -151,6 +153,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
   let stream = null, facing = 'environment', currentFilter = 'none', mode = 'photo';
   let recording = false, recorder = null, chunks = [], recordStarted = 0, timerInterval = null;
   let torchOn = false, zoomValue = 1, currentPreviewId = null, db = null, currentSettings = {};
+  let zoomStartY = null, zoomStartValue = 1, lastGestureZoomAt = 0;
   const DB_NAME = 'PizCameraMediaDB', STORE = 'media';
 
   function toast(message, ms=2500) {
@@ -234,36 +237,64 @@ button:disabled{opacity:.4;cursor:not-allowed}
     }
   }
   function updateMirror() { video.classList.toggle('mirror', facing === 'user' && $('mirrorToggle').checked); }
-  async function toggleTorch() {
-    if (!stream) { toast('Open the camera first.'); return; }
-    const track = stream.getVideoTracks()[0];
-    const caps = track?.getCapabilities?.();
-    if (!caps || !caps.torch) { toast('Flash/torch is not supported by this camera or browser.'); return; }
+  async function applyTorch(enabled, quiet=false) {
+    if (!stream) { if (!quiet) toast('Open the camera first.'); return false; }
+    const track = stream.getVideoTracks()[0], caps = track?.getCapabilities?.();
+    if (!caps || !caps.torch) { if (!quiet) toast('Flashlight control is not supported by this camera/browser.'); return false; }
     try {
-      torchOn = !torchOn;
-      await track.applyConstraints({advanced:[{torch:torchOn}]});
+      await track.applyConstraints({advanced:[{torch:!!enabled}]});
+      torchOn = !!enabled;
       $('flashBtn').style.color = torchOn ? 'var(--green)' : '#fff';
-      setStatus(torchOn ? 'Torch on' : 'Torch off');
-    } catch (e) { torchOn = false; toast('Could not change flash setting on this device.'); }
+      $('flashBtn').textContent = torchOn ? '🔦' : '⚡';
+      if (!quiet) setStatus(torchOn ? 'Flashlight on' : 'Flashlight off');
+      return true;
+    } catch (e) { if (!quiet) toast('Could not change flashlight on this device.'); return false; }
   }
-  async function setZoom(value) {
-    zoomValue = value;
-    document.querySelectorAll('.zoomBtn').forEach(b => b.classList.toggle('active', Number(b.dataset.zoom) === value));
-    $('zoomLabel').textContent = value+'x';
-    if (!stream) { toast('Open the camera first to apply zoom.'); return; }
+  async function toggleTorch() {
+    const mode = $('torchSetting')?.value || 'manual';
+    if (mode === 'off') { toast('Flashlight mode is set to Always off in Settings.'); return; }
+    await applyTorch(!torchOn);
+  }
+  async function setZoom(value, quiet=false) {
+    zoomValue = Math.max(1, Math.min(6, Number(value) || 1));
+    document.querySelectorAll('.zoomBtn').forEach(b => b.classList.toggle('active', Math.abs(Number(b.dataset.zoom) - zoomValue) < 0.06));
+    $('zoomLabel').textContent = zoomValue.toFixed(1)+'x';
+    if ($('zoomRange')) $('zoomRange').value = String(zoomValue);
+    const mirrored = facing === 'user' && $('mirrorToggle').checked;
+    if (!stream) {
+      video.style.transform = (mirrored ? 'scaleX(-1) ' : '') + `scale(${zoomValue})`;
+      if (!quiet) toast('Open the camera to apply zoom.');
+      return;
+    }
     const track = stream.getVideoTracks()[0], caps = track?.getCapabilities?.();
     if (caps && caps.zoom) {
       try {
-        const z = Math.min(caps.zoom.max, Math.max(caps.zoom.min, value));
+        const z = Math.min(caps.zoom.max, Math.max(caps.zoom.min, zoomValue));
         await track.applyConstraints({advanced:[{zoom:z}]});
-        setStatus('Hardware zoom '+z.toFixed(1)+'x'); return;
+        video.style.transform = mirrored ? 'scaleX(-1)' : 'none';
+        if (!quiet) setStatus('Camera zoom '+z.toFixed(1)+'x');
+        return;
       } catch (_) {}
     }
-    // Browser-safe digital zoom fallback for the live preview only.
-    video.style.transform = (facing === 'user' && $('mirrorToggle').checked ? 'scaleX(-1) ' : '') + `scale(${value})`;
-    setStatus('Preview zoom '+value+'x');
-    if (value > 1) toast('Digital preview zoom. Saved photos use the full camera frame.');
+    // Smooth digital preview fallback; hardware zoom is preferred when available.
+    video.style.transform = (mirrored ? 'scaleX(-1) ' : '') + `scale(${zoomValue})`;
+    if (!quiet) setStatus('Preview zoom '+zoomValue.toFixed(1)+'x');
   }
+  function onCameraTouchStart(e) {
+    if (e.touches.length !== 1 || $('start').style.display !== 'none') return;
+    zoomStartY = e.touches[0].clientY; zoomStartValue = zoomValue;
+  }
+  function onCameraTouchMove(e) {
+    if (zoomStartY === null || e.touches.length !== 1) return;
+    const delta = zoomStartY - e.touches[0].clientY;
+    // About 100 px of vertical movement changes zoom by 1x. Up = zoom in; down = zoom out.
+    const next = Math.max(1, Math.min(6, zoomStartValue + delta / 100));
+    const now = performance.now();
+    if (now - lastGestureZoomAt < 35) return;
+    lastGestureZoomAt = now;
+    setZoom(next, true);
+  }
+  function onCameraTouchEnd() { if (zoomStartY !== null) { zoomStartY = null; setZoom(zoomValue, true); } }
   function applyPreviewFilter() { video.style.filter = currentFilter === 'none' ? 'none' : currentFilter; }
   function setFilter(filter, button) {
     currentFilter = filter; applyPreviewFilter();
@@ -434,9 +465,15 @@ button:disabled{opacity:.4;cursor:not-allowed}
   document.querySelectorAll('.mode').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
   document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>closeView(b.dataset.close)));
   $('gridToggle').addEventListener('change',e=>$('gridOverlay').style.display=e.target.checked?'block':'none');
-  $('mirrorToggle').addEventListener('change',()=>{updateMirror(); if (zoomValue>1) setZoom(zoomValue);});
+  $('mirrorToggle').addEventListener('change',()=>{updateMirror(); setZoom(zoomValue, true);});
   $('videoQuality').addEventListener('change',()=>{ if(stream && !recording) toast('Restart the camera to apply the new video resolution.'); });
   $('frameRate').addEventListener('change',()=>{ if(stream && !recording) toast('Restart the camera to apply the new frame rate.'); });
+  $('torchSetting').addEventListener('change', async e=>{ if(e.target.value==='off') await applyTorch(false, true); else if(e.target.value==='on') { const ok=await applyTorch(true, true); if(!ok) toast('This device does not support continuous flashlight control.'); } });
+  $('zoomRange').addEventListener('input',e=>setZoom(Number(e.target.value), true));
+  video.addEventListener('touchstart',onCameraTouchStart,{passive:true});
+  video.addEventListener('touchmove',onCameraTouchMove,{passive:true});
+  video.addEventListener('touchend',onCameraTouchEnd,{passive:true});
+  video.addEventListener('touchcancel',onCameraTouchEnd,{passive:true});
   $('photoQuality').addEventListener('change',()=>toast('Photo size setting updated.'));
   $('clearGallery').addEventListener('click',clearGallery);
   document.addEventListener('visibilitychange',()=>{ if(document.hidden && recording) stopRecording(); });
